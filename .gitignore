@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Data files (uploaded by users, not committed)
+*.tsv
+*.csv
+*.xlsx
+*.xls
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Old architecture docs (keep SETUP.md and README)
+Feed_Optimisation_Streamlit_Tool_Architecture.md
+Performance_Integration_Architecture.md
+CLAUDE_CODE_BUILD_PROMPT.md
+Feed_Optimisation_Tool_Overview.md
+google_feed_optimisation_context.md
+Feed Optimisation - Session Context.md
+
+# Legacy files
+Bogs_AU_Feed_Optimised.csv
+Bogs_Feed_Optimised.csv
+app.py
