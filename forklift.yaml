@@ -1,0 +1,20 @@
+name: feed-enrichment
+port: 8501
+
+# Container resources
+cpu: 512
+memory: 1024
+
+# Health check
+health_check_path: /_stcore/health
+
+# Environment variables
+env:
+  STREAMLIT_SERVER_PORT: "8501"
+  STREAMLIT_SERVER_HEADLESS: "true"
+  STREAMLIT_SERVER_ADDRESS: "0.0.0.0"
+  STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+
+# Disable metrics and fluentbit (standard for internal apps)
+disable_metrics: true
+disable_fluentbit: true
