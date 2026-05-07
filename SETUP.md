@@ -24,12 +24,14 @@ If you see a version number (e.g., `Python 3.12.x`), you're good. If not:
 
 ### Step 2: Navigate to the project folder
 
-Type `cd ` (with a space after), then drag the "Feed Optimisation Project" folder from Finder/Explorer into the Terminal window. It will paste the path. Press Enter.
+Type `cd ` (with a space after), then drag the "Feed Optimisation Project" folder from Finder/Explorer into the Terminal window. It will paste the path automatically. Press Enter.
 
 It should look something like:
 ```bash
 cd "/Users/yourname/Documents/Feed Optimisation Project"
 ```
+
+**Important:** Always wrap the path in double quotes because the folder name has spaces. Don't use backslash escaping like `Feed\ Optimisation\ Project` - quotes are simpler and less error-prone.
 
 ### Step 3: Create a virtual environment
 
