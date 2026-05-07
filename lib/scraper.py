@@ -25,6 +25,7 @@ import json
 import time
 import re
 import logging
+import os
 from urllib.parse import urlparse, urljoin
 from typing import Optional
 
@@ -120,6 +121,142 @@ def scrape_feed_urls(
             time.sleep(delay)
 
     return pd.DataFrame(results)
+
+
+# ============================================================
+# RESUMABLE SCRAPING (checkpoint to disk)
+# ============================================================
+
+def scrape_feed_urls_resumable(
+    feed_df: pd.DataFrame,
+    url_col: str = "link",
+    id_col: str = "id",
+    max_products: Optional[int] = None,
+    delay: float = 1.0,
+    timeout: int = 15,
+    checkpoint_path: str = "scrape_checkpoint.csv",
+    checkpoint_every: int = 25,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """
+    Resumable version of scrape_feed_urls. Saves progress to a checkpoint
+    file every N products. On restart, skips already-scraped SKUs.
+
+    Args:
+        feed_df: Feed DataFrame with product URLs.
+        url_col: Column containing the product URL.
+        id_col: Column containing the SKU ID.
+        max_products: Limit number of products to scrape (None = all).
+        delay: Seconds between requests (rate limiting).
+        timeout: Request timeout in seconds.
+        checkpoint_path: Path for the checkpoint CSV file.
+        checkpoint_every: Save checkpoint after this many new scrapes.
+        progress_callback: Optional callable(current, total, resumed) for progress.
+
+    Returns:
+        DataFrame with all results (resumed + newly scraped).
+    """
+    # Load existing checkpoint if present
+    existing_results = []
+    already_scraped = set()
+
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint_df = pd.read_csv(checkpoint_path, low_memory=False)
+            existing_results = checkpoint_df.to_dict("records")
+            already_scraped = set(checkpoint_df["sku_id"].astype(str).tolist())
+            logger.info(f"Resumed from checkpoint: {len(already_scraped)} products already scraped")
+        except Exception as e:
+            logger.warning(f"Could not load checkpoint: {e}")
+
+    # Build URL list, excluding already-scraped
+    urls = feed_df[[id_col, url_col]].dropna(subset=[url_col]).copy()
+    urls[id_col] = urls[id_col].astype(str)
+
+    if max_products:
+        urls = urls.head(max_products)
+
+    remaining = urls[~urls[id_col].isin(already_scraped)]
+    total = len(urls)
+    done_before = len(already_scraped & set(urls[id_col].tolist()))
+    to_scrape = len(remaining)
+
+    logger.info(f"Total: {total}, Already done: {done_before}, Remaining: {to_scrape}")
+
+    session = requests.Session()
+    session.headers.update(DEFAULT_HEADERS)
+
+    # Detect platform
+    first_url = remaining[url_col].iloc[0] if len(remaining) > 0 else ""
+    platform = _detect_platform(first_url) if first_url else "unknown"
+
+    new_results = []
+
+    for i, (_, row) in enumerate(remaining.iterrows()):
+        sku_id = str(row[id_col])
+        raw_url = str(row[url_col])
+        clean_url = _clean_url(raw_url)
+
+        current = done_before + i + 1
+        if progress_callback:
+            progress_callback(current, total, done_before)
+
+        try:
+            if platform == "shopify":
+                result = _scrape_shopify(session, clean_url, timeout)
+            else:
+                result = _scrape_generic(session, clean_url, timeout)
+            result["sku_id"] = sku_id
+            result["scrape_status"] = "ok"
+        except requests.exceptions.Timeout:
+            result = _empty_result(sku_id, "timeout")
+        except requests.exceptions.ConnectionError:
+            result = _empty_result(sku_id, "connection_error")
+        except Exception as e:
+            result = _empty_result(sku_id, f"error: {str(e)[:100]}")
+
+        new_results.append(result)
+
+        # Checkpoint save
+        if (i + 1) % checkpoint_every == 0:
+            _save_checkpoint(existing_results + new_results, checkpoint_path)
+            logger.info(f"Checkpoint saved at {current}/{total}")
+
+        if i < to_scrape - 1:
+            time.sleep(delay)
+
+    # Final save
+    all_results = existing_results + new_results
+    _save_checkpoint(all_results, checkpoint_path)
+
+    return pd.DataFrame(all_results)
+
+
+def get_checkpoint_info(checkpoint_path: str = "scrape_checkpoint.csv") -> dict:
+    """Check if a checkpoint file exists and return its stats."""
+    if not os.path.exists(checkpoint_path):
+        return {"exists": False, "count": 0, "path": checkpoint_path}
+
+    try:
+        df = pd.read_csv(checkpoint_path, low_memory=False)
+        ok_count = (df["scrape_status"] == "ok").sum()
+        return {
+            "exists": True,
+            "count": len(df),
+            "ok_count": ok_count,
+            "failed_count": len(df) - ok_count,
+            "path": checkpoint_path,
+        }
+    except Exception:
+        return {"exists": False, "count": 0, "path": checkpoint_path}
+
+
+def _save_checkpoint(results: list, path: str):
+    """Save results list to a checkpoint CSV."""
+    try:
+        pd.DataFrame(results).to_csv(path, index=False)
+    except Exception as e:
+        logger.error(f"Failed to save checkpoint: {e}")
 
 
 # ============================================================

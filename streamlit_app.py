@@ -35,6 +35,15 @@ from lib.ai_enrichment import (
     batch_validate_enrichment,
     batch_validate_optimised,
 )
+from lib.keyword_planner import (
+    GoogleAdsCredentials,
+    get_search_volume,
+    get_keyword_ideas,
+    pull_search_terms_report,
+    enrich_matched_terms_with_volume,
+    GEO_TARGETS,
+    LANGUAGES,
+)
 
 
 # ============================================================
@@ -640,7 +649,70 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("Feed Enrichment Tool v1.2")
+
+    # --- Google Ads API config (optional) ---
+    st.markdown('<p class="overline">Google Ads API (optional)</p>', unsafe_allow_html=True)
+
+    with st.expander("Keyword Planner credentials", expanded=False):
+        gads_developer_token = st.text_input(
+            "Developer token",
+            type="password",
+            placeholder="xxxxxxxxxxxxxxx",
+            help="From Google Ads API Center (ask your Google Ads manager)",
+        )
+        gads_client_id = st.text_input(
+            "OAuth client ID",
+            placeholder="xxxx.apps.googleusercontent.com",
+            help="From Google Cloud Console OAuth 2.0 credentials",
+        )
+        gads_client_secret = st.text_input(
+            "OAuth client secret",
+            type="password",
+            help="From Google Cloud Console",
+        )
+        gads_refresh_token = st.text_input(
+            "OAuth refresh token",
+            type="password",
+            help="Generated via google-ads auth flow",
+        )
+        gads_customer_id = st.text_input(
+            "Customer ID",
+            placeholder="1234567890",
+            help="Google Ads account (10-digit, no dashes)",
+        )
+        gads_login_customer_id = st.text_input(
+            "Login customer ID (MCC)",
+            placeholder="9876543210",
+            help="Manager account ID (leave blank if not using MCC)",
+        )
+        gads_geo = st.selectbox(
+            "Target region",
+            options=list(GEO_TARGETS.keys()),
+            index=0,
+            help="Region for search volume data",
+        )
+        gads_language = st.selectbox(
+            "Language",
+            options=list(LANGUAGES.keys()),
+            index=0,
+            help="Language for keyword data",
+        )
+
+    # Build credentials object if all required fields are filled
+    gads_credentials = None
+    if all([gads_developer_token, gads_client_id, gads_client_secret,
+            gads_refresh_token, gads_customer_id]):
+        gads_credentials = GoogleAdsCredentials(
+            developer_token=gads_developer_token,
+            client_id=gads_client_id,
+            client_secret=gads_client_secret,
+            refresh_token=gads_refresh_token,
+            customer_id=gads_customer_id,
+            login_customer_id=gads_login_customer_id,
+        )
+
+    st.markdown("---")
+    st.caption("Feed Enrichment Tool v1.3")
     st.caption("Built by Pattern's feed team")
 
 
@@ -775,23 +847,85 @@ with tab_search:
     )
 
     st.markdown("")
-    st.markdown('<p class="overline">Search terms data</p>', unsafe_allow_html=True)
 
-    search_file = st.file_uploader(
-        "Supermetrics search terms export",
-        type=["csv", "xlsx", "xls"],
-        help="Google Ads search term data from Supermetrics",
-        key="search_terms_uploader",
+    # --- Data source selection ---
+    search_source = st.radio(
+        "Search term data source",
+        options=["CSV/XLSX upload (Supermetrics export)", "Google Ads API (direct pull)"],
+        horizontal=True,
+        help="Upload a Supermetrics export, or pull search terms directly from Google Ads API.",
+        key="search_source_radio",
     )
 
-    if search_file:
-        search_terms = load_file(search_file)
+    search_terms = None
 
+    if search_source == "CSV/XLSX upload (Supermetrics export)":
+        st.markdown('<p class="overline">Search terms data</p>', unsafe_allow_html=True)
+
+        search_file = st.file_uploader(
+            "Supermetrics search terms export",
+            type=["csv", "xlsx", "xls"],
+            help="Google Ads search term data from Supermetrics",
+            key="search_terms_uploader",
+        )
+
+        if search_file:
+            search_terms = load_file(search_file)
+
+    else:
+        # Direct Google Ads API pull
+        st.markdown('<p class="overline">Pull from Google Ads</p>', unsafe_allow_html=True)
+
+        if not gads_credentials:
+            st.warning(
+                "Google Ads API credentials not configured. "
+                "Fill in the **Keyword Planner credentials** section in the sidebar."
+            )
+        else:
+            api_col1, api_col2 = st.columns(2)
+            with api_col1:
+                date_range = st.selectbox(
+                    "Date range",
+                    options=["LAST_30_DAYS", "LAST_7_DAYS", "LAST_90_DAYS",
+                             "THIS_MONTH", "LAST_MONTH"],
+                    index=0,
+                    help="Time period for search term data",
+                )
+            with api_col2:
+                api_min_impr = st.number_input(
+                    "Min impressions", min_value=1, max_value=1000, value=5,
+                    help="Filter out very low volume terms",
+                    key="api_min_impr",
+                )
+
+            if st.button("Pull search terms from Google Ads", type="secondary", use_container_width=True):
+                with st.spinner("Pulling search terms from Google Ads API..."):
+                    try:
+                        raw_terms = pull_search_terms_report(
+                            gads_credentials,
+                            date_range=date_range,
+                            min_impressions=api_min_impr,
+                        )
+                        if raw_terms:
+                            search_terms = pd.DataFrame(raw_terms)
+                            st.session_state["api_search_terms"] = search_terms
+                            st.success(f"Pulled **{len(search_terms):,}** search terms from Google Ads.")
+                        else:
+                            st.error("No search terms returned. Check your credentials and account access.")
+                    except Exception as e:
+                        st.error(f"Google Ads API error: {e}")
+
+            # Persist across reruns
+            if "api_search_terms" in st.session_state:
+                search_terms = st.session_state["api_search_terms"]
+
+    # --- Common flow once search_terms is loaded ---
+    if search_terms is not None and len(search_terms) > 0:
         qs1, qs2, qs3 = st.columns(3)
         qs1.metric("Search terms loaded", f"{len(search_terms):,}")
 
         conv_col = next(
-            (c for c in ["Conversions", "conversions", "Conv."] if c in search_terms.columns),
+            (c for c in ["Conversions", "conversions", "Conv.", "conv_value"] if c in search_terms.columns),
             None,
         )
         if conv_col:
@@ -814,6 +948,16 @@ with tab_search:
                     help="Higher = stricter matching (0.3 recommended)",
                 )
 
+        # Keyword Planner enrichment toggle
+        enrich_with_volume = False
+        if gads_credentials:
+            enrich_with_volume = st.checkbox(
+                "Enrich with Keyword Planner search volume",
+                value=False,
+                help="After matching, look up monthly search volume for each n-gram via Google Ads Keyword Planner. "
+                     "Shows total Google search demand, not just your ad performance.",
+            )
+
         st.markdown("")
 
         if st.button("Run search intelligence", type="primary", use_container_width=True):
@@ -835,6 +979,28 @@ with tab_search:
                     f"Matched **{matched['search_term'].nunique():,}** n-grams "
                     f"to **{matched['sku_id'].nunique():,}** SKUs in {elapsed:.1f}s"
                 )
+
+                # --- Keyword Planner volume enrichment ---
+                volume_stats = None
+                if enrich_with_volume and gads_credentials and not matched.empty:
+                    st.write("Looking up search volume from Keyword Planner...")
+                    try:
+                        geo_id = GEO_TARGETS.get(gads_geo, "2036")
+                        lang_id = LANGUAGES.get(gads_language, "1000")
+
+                        matched, volume_stats = enrich_matched_terms_with_volume(
+                            matched, gads_credentials,
+                            language_id=lang_id,
+                            geo_target_id=geo_id,
+                            progress_callback=lambda msg: st.write(msg),
+                        )
+                        st.write(
+                            f"Got volume data for **{volume_stats['keywords_with_volume']:,}**/"
+                            f"**{volume_stats['keywords_looked_up']:,}** keywords "
+                            f"({volume_stats['total_monthly_searches']:,} total monthly searches)"
+                        )
+                    except Exception as e:
+                        st.warning(f"Keyword Planner enrichment failed: {e}. Continuing without volume data.")
 
                 coverage = summarise_search_coverage(feed, matched)
                 st.write(f"Coverage: **{coverage['coverage_pct']}%** of products have search data")
@@ -861,6 +1027,8 @@ with tab_search:
                 st.session_state["keyword_themes"] = keyword_themes_compact
                 st.session_state["matched"] = matched
                 st.session_state["coverage"] = coverage
+                if volume_stats:
+                    st.session_state["volume_stats"] = volume_stats
 
                 status.update(label="Search intelligence complete", state="complete")
 
@@ -876,6 +1044,15 @@ with tab_search:
             m2.metric("Coverage", f"{coverage['coverage_pct']}%")
             m3.metric("N-grams matched", f"{coverage['total_unique_terms']:,}")
             m4.metric("Converting n-grams", f"{coverage['converting_terms']:,}")
+
+            # Volume stats if available
+            if "volume_stats" in st.session_state:
+                vs = st.session_state["volume_stats"]
+                st.markdown("")
+                v1, v2, v3 = st.columns(3)
+                v1.metric("Keywords with volume data", f"{vs['keywords_with_volume']:,}")
+                v2.metric("Total monthly searches", f"{vs['total_monthly_searches']:,}")
+                v3.metric("Avg monthly searches", f"{vs['avg_monthly_searches']:,}")
 
             st.markdown("")
             st.markdown('<p class="overline">Sample search context</p>', unsafe_allow_html=True)
@@ -904,8 +1081,74 @@ with tab_search:
 
             st.success("Search intelligence ready. Go to the **Output** tab to download.")
 
-    else:
+    elif search_source == "CSV/XLSX upload (Supermetrics export)" and search_terms is None:
         st.info("Upload a Supermetrics search terms export above to use search intelligence.")
+
+    # --- Keyword Ideas (discover new keywords) ---
+    if gads_credentials:
+        st.markdown("---")
+        st.markdown('<p class="overline">Keyword Ideas (discover new terms)</p>', unsafe_allow_html=True)
+        st.markdown(
+            "Enter seed keywords (product categories, brand terms) to discover "
+            "related search terms with volume data from Google Keyword Planner."
+        )
+
+        seed_input = st.text_area(
+            "Seed keywords (one per line, max 20)",
+            placeholder="mens boots\nwaterproof hiking boots\noutdoor work boots",
+            height=100,
+            key="keyword_ideas_seeds",
+        )
+
+        ki_col1, ki_col2 = st.columns(2)
+        with ki_col1:
+            ki_max = st.number_input("Max results", min_value=10, max_value=200, value=50, key="ki_max")
+
+        if st.button("Get keyword ideas", type="secondary", use_container_width=True):
+            seeds = [s.strip() for s in seed_input.strip().split("\n") if s.strip()]
+            if not seeds:
+                st.warning("Enter at least one seed keyword.")
+            else:
+                with st.spinner(f"Generating keyword ideas from {len(seeds)} seeds..."):
+                    try:
+                        geo_id = GEO_TARGETS.get(gads_geo, "2036")
+                        lang_id = LANGUAGES.get(gads_language, "1000")
+
+                        ideas = get_keyword_ideas(
+                            seeds, gads_credentials,
+                            language_id=lang_id,
+                            geo_target_id=geo_id,
+                            max_results=ki_max,
+                        )
+                        if ideas:
+                            ideas_df = pd.DataFrame([
+                                {
+                                    "Keyword": ki.keyword,
+                                    "Avg monthly searches": ki.avg_monthly_searches,
+                                    "Competition": ki.competition,
+                                    "Competition index": ki.competition_index,
+                                    "Low bid ($)": f"${ki.low_top_of_page_bid:.2f}",
+                                    "High bid ($)": f"${ki.high_top_of_page_bid:.2f}",
+                                }
+                                for ki in ideas
+                            ])
+                            st.session_state["keyword_ideas"] = ideas_df
+                            st.success(f"Found **{len(ideas)}** keyword ideas.")
+                        else:
+                            st.warning("No keyword ideas returned. Try different seed terms.")
+                    except Exception as e:
+                        st.error(f"Keyword Ideas API error: {e}")
+
+        if "keyword_ideas" in st.session_state:
+            ideas_df = st.session_state["keyword_ideas"]
+            st.dataframe(ideas_df, use_container_width=True, height=400)
+
+            st.download_button(
+                "Download keyword ideas (CSV)",
+                data=to_csv_bytes(ideas_df),
+                file_name="keyword_ideas.csv",
+                mime="text/csv",
+            )
 
 
 # ============================================================
@@ -1711,21 +1954,33 @@ with tab_explore:
 
         st.markdown('<p class="overline">Top n-grams by conversion value</p>', unsafe_allow_html=True)
 
+        # Build aggregation dict - include volume columns if present
+        agg_dict = {
+            "Revenue": ("conv_value", "first"),
+            "Conversions": ("conversions", "first"),
+            "Impressions": ("impressions", "first"),
+            "Sources": ("term_count", "first"),
+            "SKUs": ("sku_id", "nunique"),
+            "Specificity": ("specificity", "first"),
+        }
+        has_volume = "avg_monthly_searches" in matched.columns
+        if has_volume:
+            agg_dict["Monthly searches"] = ("avg_monthly_searches", "first")
+            agg_dict["Competition"] = ("competition", "first")
+            agg_dict["Bid low ($)"] = ("top_of_page_bid_low", "first")
+            agg_dict["Bid high ($)"] = ("top_of_page_bid_high", "first")
+
         ng_agg = (
             matched.groupby("search_term")
-            .agg(
-                Revenue=("conv_value", "first"),
-                Conversions=("conversions", "first"),
-                Impressions=("impressions", "first"),
-                Sources=("term_count", "first"),
-                SKUs=("sku_id", "nunique"),
-                Specificity=("specificity", "first"),
-            )
+            .agg(**agg_dict)
             .sort_values("Revenue", ascending=False)
             .head(30)
         )
         ng_agg["Revenue"] = ng_agg["Revenue"].apply(lambda x: f"${x:,.0f}")
         ng_agg["Specificity"] = (ng_agg["Specificity"] * 100).round(0).astype(int).astype(str) + "%"
+        if has_volume:
+            ng_agg["Bid low ($)"] = ng_agg["Bid low ($)"].apply(lambda x: f"${x:.2f}" if x else "")
+            ng_agg["Bid high ($)"] = ng_agg["Bid high ($)"].apply(lambda x: f"${x:.2f}" if x else "")
         st.dataframe(ng_agg, use_container_width=True, height=500)
 
         st.markdown("---")
@@ -1763,7 +2018,11 @@ with tab_explore:
                 if len(sku_matches) > 0:
                     st.markdown(f"**Matched n-grams** ({len(sku_matches)})")
                     display_cols = [
-                        c for c in ["search_term", "relevance_score", "impressions", "clicks", "conversions", "conv_value", "specificity"]
+                        c for c in [
+                            "search_term", "relevance_score", "impressions", "clicks",
+                            "conversions", "conv_value", "specificity",
+                            "avg_monthly_searches", "competition", "top_of_page_bid_high",
+                        ]
                         if c in sku_matches.columns
                     ]
                     st.dataframe(sku_matches[display_cols], use_container_width=True, height=300)
